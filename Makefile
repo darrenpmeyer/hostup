@@ -27,7 +27,7 @@ nix: make_dirs dist_dir
 	GOOS=linux GOARCH=arm64 $(GO) build -o "$(DIST_DIR)/$(APP)-Linux-arm64" .
 
 test:
-	./smoke-hostup.zsh
+	./test/smoke-hostup.zsh
 
 clean:
 	rm -f "$(APP)"
