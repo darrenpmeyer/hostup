@@ -153,3 +153,11 @@ Verbose diagnostics:
 ```sh
 ./hostup -vv -p 443 example.com
 ```
+
+## License
+
+This project is licensed under the GNU Affero General Public License, version 3 only (`AGPL-3.0-only`).
+
+Copyright (C) 2026 Darren P Meyer.
+
+See `LICENSE` for the full text.
