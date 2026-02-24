@@ -1,0 +1,136 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Darren P Meyer
+name: Create Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to create or release (for example: v1.0.0)
+        required: true
+        type: string
+      release_name:
+        description: Release title (defaults to tag if empty)
+        required: false
+        type: string
+      target_commitish:
+        description: Branch or commit SHA to tag if the tag does not already exist
+        required: false
+        default: main
+        type: string
+      draft:
+        description: Create as draft release
+        required: false
+        default: false
+        type: boolean
+      prerelease:
+        description: Mark as prerelease
+        required: false
+        default: false
+        type: boolean
+      generate_release_notes:
+        description: Auto-generate release notes
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Resolve build ref
+        id: ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="${{ inputs.tag }}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "build_ref=refs/tags/${tag}" >> "$GITHUB_OUTPUT"
+          else
+            echo "build_ref=${{ inputs.target_commitish }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "release_name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "target_commitish=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+            echo "draft=false" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "generate_release_notes=true" >> "$GITHUB_OUTPUT"
+          else
+            release_name="${{ inputs.release_name }}"
+            if [ -z "$release_name" ]; then
+              release_name="${{ inputs.tag }}"
+            fi
+            echo "release_name=${release_name}" >> "$GITHUB_OUTPUT"
+            echo "target_commitish=${{ inputs.target_commitish }}" >> "$GITHUB_OUTPUT"
+            echo "draft=${{ inputs.draft }}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=${{ inputs.prerelease }}" >> "$GITHUB_OUTPUT"
+            echo "generate_release_notes=${{ inputs.generate_release_notes }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out build ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach "${{ steps.ref.outputs.build_ref }}"
+
+      - name: Build release binaries
+        run: make nix
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign release binaries with Sigstore
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(dist/*)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No build artifacts found in dist/"
+            exit 1
+          fi
+          for file in "${files[@]}"; do
+            cosign sign-blob --yes \
+              --output-signature "${file}.sig" \
+              --output-certificate "${file}.pem" \
+              "${file}"
+          done
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ref.outputs.tag }}
+          name: ${{ steps.meta.outputs.release_name }}
+          target_commitish: ${{ steps.meta.outputs.target_commitish }}
+          draft: ${{ steps.meta.outputs.draft }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          generate_release_notes: ${{ steps.meta.outputs.generate_release_notes }}
+          files: |
+            dist/*
+          fail_on_unmatched_files: true
