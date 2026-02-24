@@ -68,6 +68,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	timeout := time.Duration(cfg.timeoutMS) * time.Millisecond
 	hostForCheck := cfg.target
+	resolvedFromHostname := false
 	log.stepf("processing target %q", cfg.target)
 	if parsedIP, err := netip.ParseAddr(cfg.target); err != nil {
 		log.step("validating hostname")
@@ -88,6 +89,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return log.exit(exitNameLookup)
 		}
 		hostForCheck = resolvedHost
+		resolvedFromHostname = true
 		log.setIP(resolvedHost)
 		log.okf("hostname resolution", "%s in %dms", resolvedHost, time.Since(start).Milliseconds())
 	} else {
@@ -100,6 +102,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		log.stepf("tcp probe %s", net.JoinHostPort(hostForCheck, strconv.Itoa(cfg.port)))
 		start := time.Now()
 		if err := tcpCheck(hostForCheck, cfg.port, timeout); err != nil {
+			if resolvedFromHostname && cfg.isDualStackFallbackMode() && isIPv6Literal(hostForCheck) {
+				log.failf("tcp probe", "%v", err)
+				if fallbackHost, ok := tryIPv4ProbeFallback(log, cfg, timeout, "tcp", cfg.target, cfg.port); ok {
+					hostForCheck = fallbackHost
+					return log.exit(exitUp)
+				}
+				return log.exit(exitHostUnreach)
+			}
 			log.failf("tcp probe", "%v", err)
 			return log.exit(exitHostUnreach)
 		}
@@ -110,11 +120,57 @@ func run(args []string, stdout, stderr io.Writer) int {
 	log.stepf("icmp echo %s", hostForCheck)
 	start := time.Now()
 	if err := pingCheck(hostForCheck, timeout); err != nil {
+		if resolvedFromHostname && cfg.isDualStackFallbackMode() && isIPv6Literal(hostForCheck) {
+			log.failf("icmp echo", "%v", err)
+			if fallbackHost, ok := tryIPv4ProbeFallback(log, cfg, timeout, "icmp", cfg.target, 0); ok {
+				hostForCheck = fallbackHost
+				return log.exit(exitUp)
+			}
+			return log.exit(exitHostUnreach)
+		}
 		log.failf("icmp echo", "%v", err)
 		return log.exit(exitHostUnreach)
 	}
 	log.okf("icmp echo", "reply in %dms", time.Since(start).Milliseconds())
 	return log.exit(exitUp)
+}
+
+func tryIPv4ProbeFallback(log *verbosityLogger, cfg config, timeout time.Duration, probeKind, hostname string, port int) (string, bool) {
+	log.step("resolving IPv4 fallback")
+	lookupCtx, cancel := context.WithTimeout(context.Background(), lookupTimeout)
+	defer cancel()
+	start := time.Now()
+	fallbackHost, err := resolveName(lookupCtx, hostname, cfg.dnsServer, []string{"ip4"})
+	if err != nil {
+		log.failf("IPv4 fallback resolution", "%v", err)
+		return "", false
+	}
+	log.setIP(fallbackHost)
+	log.okf("IPv4 fallback resolution", "%s in %dms", fallbackHost, time.Since(start).Milliseconds())
+
+	switch probeKind {
+	case "tcp":
+		log.stepf("tcp probe %s (IPv4 fallback)", net.JoinHostPort(fallbackHost, strconv.Itoa(port)))
+		start = time.Now()
+		if err := tcpCheck(fallbackHost, port, timeout); err != nil {
+			log.failf("tcp probe (IPv4 fallback)", "%v", err)
+			return "", false
+		}
+		log.okf("tcp probe (IPv4 fallback)", "connected in %dms", time.Since(start).Milliseconds())
+		return fallbackHost, true
+	case "icmp":
+		log.stepf("icmp echo %s (IPv4 fallback)", fallbackHost)
+		start = time.Now()
+		if err := pingCheck(fallbackHost, timeout); err != nil {
+			log.failf("icmp echo (IPv4 fallback)", "%v", err)
+			return "", false
+		}
+		log.okf("icmp echo (IPv4 fallback)", "reply in %dms", time.Since(start).Milliseconds())
+		return fallbackHost, true
+	default:
+		log.failf("IPv4 fallback", "unknown probe kind %q", probeKind)
+		return "", false
+	}
 }
 
 func parseArgs(args []string, stderr io.Writer) (config, int, error) {
@@ -321,6 +377,15 @@ func (c config) resolutionNetworks() []string {
 		// Default and (-4 && -6): prefer IPv6, then fall back to IPv4.
 		return []string{"ip6", "ip4"}
 	}
+}
+
+func (c config) isDualStackFallbackMode() bool {
+	return len(c.resolutionNetworks()) == 2
+}
+
+func isIPv6Literal(s string) bool {
+	ip, err := netip.ParseAddr(s)
+	return err == nil && ip.Is6()
 }
 
 func validateHostname(host string) error {

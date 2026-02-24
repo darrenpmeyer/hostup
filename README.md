@@ -84,6 +84,7 @@ hostup [options] <hostname-or-ip>
   - validates the hostname syntax
   - resolves it using the OS resolver by default, or `-d` if provided
   - prefers IPv6 first, then falls back to IPv4 (default behavior)
+  - in default dual-stack mode (`-4 -6` or neither flag), if an IPv6 address resolves first but the probe fails, `hostup` re-resolves IPv4 and retries the probe once against the IPv4 address
 - Reachability probe:
   - ICMP echo by default
   - TCP connect when `-p <port>` is set
@@ -97,7 +98,8 @@ hostup [options] <hostname-or-ip>
 - `-6`: resolve hostnames to IPv6 only
 - `-4 -6`: same as default behavior (prefer IPv6, fall back to IPv4)
 - `-v`: print the IP address used (stdout), whether provided directly or resolved
-- `-vv`: verbose step logging to stderr, and implies `-v`
+- `-vv`: verbose step logging to stderr, prints the final exit code, and implies `-v`
+- In dual-stack mode, the address printed by `-v` / `-vv` is whichever address is ultimately used successfully, or (if no probe succeeds) the last resolved address attempted
 
 ### Exit Codes
 
@@ -146,7 +148,7 @@ IP4="$(./hostup -4 -v example.com)"
 IP6="$(./hostup -6 -v example.com)"
 ```
 
-> NOTE: IP address is printed and captured even if the host ping/connect fails
+> NOTE: IP address is printed and captured even if the host ping/connect fails. In dual-stack mode, this will be the last resolved address attempted (for example, IPv4 after an IPv6 probe failure fallback).
 
 Verbose diagnostics:
 
